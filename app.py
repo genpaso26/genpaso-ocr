@@ -8,13 +8,14 @@ import json
 import os
 import uuid
 from io import BytesIO
+from pathlib import Path
 
 import anthropic
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 
