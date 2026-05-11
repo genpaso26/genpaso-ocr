@@ -233,10 +233,25 @@ def df_a_excel(df: pd.DataFrame, sheet_name: str = "GenPaso") -> bytes:
 
 # ── UI ──────────────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="GenPaso OCR v2", page_icon="🐴", layout="wide")
+LOGO_TYPO = Path(__file__).parent / "images" / "LogoTypoTrans.png"
+LOGO_ICON = Path(__file__).parent / "images" / "LogoTrans1.png"
 
-st.title("🐴 GenPaso — Ingesta Masiva de Registros Equinos")
-st.caption("Procesa múltiples registros, detecta ancestros y construye la base de datos genética de GenPaso.")
+st.set_page_config(
+    page_title="GenPaso OCR",
+    page_icon=str(LOGO_ICON) if LOGO_ICON.exists() else "🐴",
+    layout="wide",
+)
+
+# Header con logo
+col_logo, col_titulo = st.columns([1, 4], gap="medium")
+with col_logo:
+    if LOGO_TYPO.exists():
+        st.image(str(LOGO_TYPO), use_container_width=True)
+with col_titulo:
+    st.markdown("## Ingesta Masiva de Registros Equinos")
+    st.caption("Procesa múltiples registros, detecta ancestros y construye la base de datos genética de GenPaso.")
+
+st.divider()
 
 # Estado de sesión
 for key in ["resumenes", "db_sesion", "db_master_snapshot"]:
@@ -245,6 +260,12 @@ for key in ["resumenes", "db_sesion", "db_master_snapshot"]:
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    if LOGO_ICON.exists():
+        st.markdown(
+            "<style>[data-testid='stSidebar'] img { image-rendering: high-quality; }</style>",
+            unsafe_allow_html=True,
+        )
+        st.image(str(LOGO_ICON), width=180)
     st.header("⚙️ Configuración")
     api_key_input = st.text_input("API Key de Anthropic", type="password", placeholder="sk-ant-...")
     if api_key_input:
