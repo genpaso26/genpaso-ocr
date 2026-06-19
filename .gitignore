@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 .venv/
 GenPaso_Master_DB.csv
+GenPaso_Master_DB.xlsx
+backups/

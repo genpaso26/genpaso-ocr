@@ -1,12 +1,24 @@
 """
-GenPaso OCR v5 — Campos ampliados: fecha de nacimiento, registro, criador,
-                  propietario, lugar de nacimiento y marcas.
+GenPaso OCR v6 — Persistencia robusta con Excel + CSV de respaldo,
+                  restauración manual y reset con confirmación.
+
+NOTA TÉCNICA: En Streamlit Community Cloud el filesystem es efímero y puede
+resetearse en reinicios o redeploys. Esta versión mitiga el problema con:
+  1. Guardado inmediato en Excel + CSV después de cada archivo procesado.
+  2. Restauración manual subiendo el Excel descargado previamente.
+  3. Backups automáticos antes de resetear.
+Para persistencia 100% permanente se recomienda integrar una DB externa:
+  - Supabase / PostgreSQL
+  - Google Drive API
+  - AWS S3
+  - Firebase Firestore
 """
 
 import base64
 import json
 import os
 import uuid
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -17,22 +29,23 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-# ── Rutas y constantes ─────────────────────────────────────────────────────────
+# ── Rutas ──────────────────────────────────────────────────────────────────────
 
-MASTER_DB_PATH = Path(__file__).parent / "GenPaso_Master_DB.csv"
-LOGO_TYPO      = Path(__file__).parent / "images" / "LogoTypoTrans.png"
-LOGO_ICON      = Path(__file__).parent / "images" / "LogoTrans1.png"
+BASE_DIR         = Path(__file__).parent
+MASTER_XLSX_PATH = BASE_DIR / "GenPaso_Master_DB.xlsx"
+MASTER_CSV_PATH  = BASE_DIR / "GenPaso_Master_DB.csv"
+BACKUPS_DIR      = BASE_DIR / "backups"
+LOGO_TYPO        = BASE_DIR / "images" / "LogoTypoTrans.png"
+LOGO_ICON        = BASE_DIR / "images" / "LogoTrans1.png"
 
 COLUMNAS_MASTER = [
     "horse_id", "registration_number", "Horse_Chip",
     "name", "gender", "sire_id", "dam_id",
     "Gait", "color", "issuing_association_id",
-    # Campos ampliados v5
     "date_of_birth", "registration_date", "breeder",
     "owner", "place_of_birth", "markings",
 ]
 
-# Campos que el usuario puede editar manualmente (horse_id es solo lectura)
 CAMPOS_EDITABLES = [
     "registration_number", "Horse_Chip", "name", "gender",
     "sire_id", "dam_id", "Gait", "color", "issuing_association_id",
@@ -67,7 +80,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON con esta estructura:
       "gender": "<Semental | Yegua | Castrado, o null>",
       "Gait": "<modalidad, o null>",
       "issuing_association_id": "<asociación, o null>",
-      "date_of_birth": "<fecha de nacimiento del ancestro si aparece en el documento, o null>",
+      "date_of_birth": "<fecha de nacimiento del ancestro si aparece, o null>",
       "registration_date": "<fecha de registro del ancestro si aparece, o null>",
       "breeder": "<criador del ancestro si aparece, o null>",
       "owner": "<propietario del ancestro si aparece, o null>",
@@ -80,7 +93,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON con esta estructura:
 Reglas críticas:
 - "gender" solo acepta: Semental, Yegua, Castrado.
 - Conserva títulos en nombres de ancestros (FC = Fuera de Concurso, CH = Champion, etc.).
-- Es crítico identificar el Gait (Modalidad) y la Asociación de cada ejemplar para la pureza de la DB de GenPaso.
+- Es crítico identificar el Gait (Modalidad) y la Asociación de cada ejemplar.
 - No inventes criador, dueño, lugar de nacimiento ni marcas. Si no aparece claramente, usa null.
 - Si un ancestro no aparece en el documento, no lo incluyas en la lista.
 - Solo devuelve el JSON, sin texto adicional ni bloques de código markdown.
@@ -128,35 +141,88 @@ def verificar_autenticacion():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DB MAESTRA
+# DB MAESTRA — PERSISTENCIA
 # ══════════════════════════════════════════════════════════════════════════════
-
-def cargar_master_db() -> pd.DataFrame:
-    if MASTER_DB_PATH.exists():
-        df = pd.read_csv(MASTER_DB_PATH, dtype=str)
-        for col in COLUMNAS_MASTER:
-            if col not in df.columns:
-                df[col] = None
-        return df[COLUMNAS_MASTER]
-    return pd.DataFrame(columns=COLUMNAS_MASTER)
-
-
-def guardar_master_db(df: pd.DataFrame):
-    df.to_csv(MASTER_DB_PATH, index=False)
-
 
 def _es_vacio(valor) -> bool:
     return pd.isna(valor) or str(valor).strip() in ("", "None", "nan", "NaN")
 
 
-# ── REQ 1: Guardar correcciones manuales ──────────────────────────────────────
+def normalizar_master_db(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garantiza columnas correctas, orden, sin duplicados exactos y sin nan sueltos.
+    """
+    # Agregar columnas faltantes
+    for col in COLUMNAS_MASTER:
+        if col not in df.columns:
+            df[col] = None
+
+    # Mantener columnas extra que puedan existir y no estén en COLUMNAS_MASTER
+    cols_extra = [c for c in df.columns if c not in COLUMNAS_MASTER]
+    df = df[COLUMNAS_MASTER + cols_extra]
+
+    # Convertir todo a string limpio, reemplazar nan/None por vacío
+    df = df.astype(str)
+    df = df.replace({"nan": "", "None": "", "NaN": "", "<NA>": ""})
+
+    # Eliminar duplicados exactos
+    df = df.drop_duplicates()
+
+    return df.reset_index(drop=True)
+
+
+def cargar_master_db() -> pd.DataFrame:
+    """
+    Orden de prioridad:
+      1. GenPaso_Master_DB.xlsx  (fuente principal)
+      2. GenPaso_Master_DB.csv   (migrar y generar xlsx)
+      3. DataFrame vacío
+    """
+    if MASTER_XLSX_PATH.exists():
+        try:
+            df = pd.read_excel(MASTER_XLSX_PATH, dtype=str)
+            return normalizar_master_db(df)
+        except Exception:
+            pass  # Si el Excel está corrupto, intentar CSV
+
+    if MASTER_CSV_PATH.exists():
+        try:
+            df = pd.read_csv(MASTER_CSV_PATH, dtype=str)
+            df = normalizar_master_db(df)
+            guardar_master_db(df)  # Migrar a Excel
+            return df
+        except Exception:
+            pass
+
+    return pd.DataFrame(columns=COLUMNAS_MASTER)
+
+
+def guardar_master_db(df: pd.DataFrame):
+    """Guarda en Excel (fuente principal) y CSV (respaldo)."""
+    df = normalizar_master_db(df)
+    df.to_excel(MASTER_XLSX_PATH, index=False, engine="openpyxl")
+    df.to_csv(MASTER_CSV_PATH, index=False)
+
+
+def backup_master_db() -> Path | None:
+    """Crea backup con timestamp antes de operaciones destructivas."""
+    if not MASTER_XLSX_PATH.exists():
+        return None
+    BACKUPS_DIR.mkdir(exist_ok=True)
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = BACKUPS_DIR / f"GenPaso_Master_DB_backup_{ts}.xlsx"
+    import shutil
+    shutil.copy2(MASTER_XLSX_PATH, dest)
+    return dest
+
+
+def hay_db_persistente() -> bool:
+    return MASTER_XLSX_PATH.exists() or MASTER_CSV_PATH.exists()
+
+
+# ── Correcciones manuales ──────────────────────────────────────────────────────
 
 def guardar_correcciones_en_master(df_editado: pd.DataFrame) -> tuple[int, list]:
-    """
-    Toma el dataframe editado por el usuario y sobreescribe los campos
-    editables en la DB Maestra buscando por horse_id.
-    Retorna (cantidad_actualizados, lista_de_advertencias).
-    """
     db           = cargar_master_db()
     actualizados = 0
     advertencias = []
@@ -166,12 +232,10 @@ def guardar_correcciones_en_master(df_editado: pd.DataFrame) -> tuple[int, list]
         if _es_vacio(horse_id):
             advertencias.append("Fila sin horse_id ignorada.")
             continue
-
         idx = db.index[db["horse_id"] == str(horse_id)].tolist()
         if not idx:
-            advertencias.append(f"horse_id {str(horse_id)[:8]}... no encontrado en DB Maestra — no se creó duplicado.")
+            advertencias.append(f"horse_id {str(horse_id)[:8]}... no encontrado — no se creó duplicado.")
             continue
-
         i = idx[0]
         for col in CAMPOS_EDITABLES:
             if col in df_editado.columns:
@@ -179,70 +243,41 @@ def guardar_correcciones_en_master(df_editado: pd.DataFrame) -> tuple[int, list]
         actualizados += 1
 
     guardar_master_db(db)
-    # Refrescar snapshot en sesión
     st.session_state.db_master_snapshot = db
     return actualizados, advertencias
 
 
-# ── REQ 3: Búsqueda con clasificación fuerte / probable ───────────────────────
+# ── Anti-duplicados ────────────────────────────────────────────────────────────
 
 def buscar_caballo(db: pd.DataFrame, registration_number=None, chip=None, nombre=None) -> dict:
-    """
-    Busca un caballo en la DB y clasifica la coincidencia:
-      - 'fuerte'       : por registration_number o Horse_Chip → fusionar automáticamente.
-      - 'probable'     : solo por nombre → NO fusionar, enviar a revisión.
-      - 'no_encontrado': no existe.
-    """
-    # Coincidencia fuerte por número de registro
     if registration_number and not _es_vacio(registration_number):
         mask = (
-            db["registration_number"]
-            .fillna("")
-            .str.strip()
-            .str.upper()
+            db["registration_number"].fillna("").str.strip().str.upper()
             == str(registration_number).strip().upper()
         )
         if mask.any():
-            return {
-                "tipo": "fuerte",
-                "horse_id": db.loc[mask, "horse_id"].iloc[0],
-                "motivo": "registration_number",
-                "coincidencias": [],
-            }
+            return {"tipo": "fuerte", "horse_id": db.loc[mask, "horse_id"].iloc[0],
+                    "motivo": "registration_number", "coincidencias": []}
 
-    # Coincidencia fuerte por chip
     if chip and not _es_vacio(chip):
         mask = db["Horse_Chip"].fillna("").str.strip() == str(chip).strip()
         if mask.any():
-            return {
-                "tipo": "fuerte",
-                "horse_id": db.loc[mask, "horse_id"].iloc[0],
-                "motivo": "Horse_Chip",
-                "coincidencias": [],
-            }
+            return {"tipo": "fuerte", "horse_id": db.loc[mask, "horse_id"].iloc[0],
+                    "motivo": "Horse_Chip", "coincidencias": []}
 
-    # Coincidencia probable solo por nombre (riesgo de falso positivo)
     if nombre and not _es_vacio(nombre):
         mask = (
-            db["name"]
-            .fillna("")
-            .str.strip()
-            .str.upper()
+            db["name"].fillna("").str.strip().str.upper()
             == str(nombre).strip().upper()
         )
         if mask.any():
-            return {
-                "tipo": "probable",
-                "horse_id": db.loc[mask, "horse_id"].iloc[0],
-                "motivo": "name",
-                "coincidencias": db[mask][COLUMNAS_MASTER].to_dict("records"),
-            }
+            return {"tipo": "probable", "horse_id": db.loc[mask, "horse_id"].iloc[0],
+                    "motivo": "name", "coincidencias": db[mask][COLUMNAS_MASTER].to_dict("records")}
 
     return {"tipo": "no_encontrado", "horse_id": None, "motivo": None, "coincidencias": []}
 
 
 def actualizar_campos_vacios(db: pd.DataFrame, horse_id: str, nuevos_datos: dict) -> pd.DataFrame:
-    """Rellena campos vacíos de un registro existente con nueva información del OCR."""
     idx = db.index[db["horse_id"] == horse_id].tolist()
     if not idx:
         return db
@@ -254,15 +289,9 @@ def actualizar_campos_vacios(db: pd.DataFrame, horse_id: str, nuevos_datos: dict
     return db
 
 
-# ── REQ 2: Actualizar parentesco sin sobrescribir ─────────────────────────────
-
 def actualizar_parentesco_si_vacio(
     db: pd.DataFrame, horse_id: str, sire_id=None, dam_id=None
 ) -> pd.DataFrame:
-    """
-    Asigna sire_id y/o dam_id a un registro existente solo si esos campos
-    están vacíos — nunca sobrescribe vínculos ya establecidos.
-    """
     idx = db.index[db["horse_id"] == horse_id].tolist()
     if not idx:
         return db
@@ -275,16 +304,8 @@ def actualizar_parentesco_si_vacio(
 
 
 def insertar_o_actualizar(
-    db: pd.DataFrame,
-    datos: dict,
-    duplicados_probables: list | None = None,
+    db: pd.DataFrame, datos: dict, duplicados_probables: list | None = None
 ) -> tuple[pd.DataFrame, str, str]:
-    """
-    Fuerte  → fusiona y actualiza campos vacíos automáticamente.
-    Probable→ inserta como nuevo y registra en duplicados_probables para revisión.
-    Nuevo   → inserta normalmente.
-    Retorna (db, horse_id, accion).
-    """
     resultado = buscar_caballo(
         db,
         registration_number=datos.get("registration_number"),
@@ -296,20 +317,18 @@ def insertar_o_actualizar(
         db = actualizar_campos_vacios(db, resultado["horse_id"], datos)
         return db, resultado["horse_id"], "vinculado"
 
-    # Insertar como nuevo en ambos casos (probable y no_encontrado)
     horse_id = str(uuid.uuid4())
     fila = {col: datos.get(col) for col in COLUMNAS_MASTER}
     fila["horse_id"] = horse_id
     db = pd.concat([db, pd.DataFrame([fila])], ignore_index=True)
 
     if resultado["tipo"] == "probable" and duplicados_probables is not None:
-        # Registrar para revisión manual — no fusionar automáticamente
         duplicados_probables.append({
-            "nombre":               datos.get("name"),
-            "horse_id_nuevo":       horse_id,
-            "coincidencia_id":      resultado["horse_id"],
-            "coincidencia_datos":   resultado["coincidencias"][0] if resultado["coincidencias"] else {},
-            "motivo":               "Coincidencia solo por nombre",
+            "nombre":             datos.get("name"),
+            "horse_id_nuevo":     horse_id,
+            "coincidencia_id":    resultado["horse_id"],
+            "coincidencia_datos": resultado["coincidencias"][0] if resultado["coincidencias"] else {},
+            "motivo":             "Coincidencia solo por nombre",
         })
         return db, horse_id, "probable"
 
@@ -359,15 +378,15 @@ def llamar_api(archivo_bytes: bytes, media_type: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PROCESAMIENTO — REQ 2: genealogía completa hasta abuelos
+# PROCESAMIENTO
 # ══════════════════════════════════════════════════════════════════════════════
 
 def procesar_archivo(
     archivo_bytes: bytes, media_type: str, db: pd.DataFrame
 ) -> tuple[pd.DataFrame, dict]:
-    resultado  = llamar_api(archivo_bytes, media_type)
-    main       = resultado.get("main", {})
-    ancestors  = resultado.get("ancestors", [])
+    resultado = llamar_api(archivo_bytes, media_type)
+    main      = resultado.get("main", {})
+    ancestors = resultado.get("ancestors", [])
 
     resumen = {
         "nombre": main.get("name", "Desconocido"),
@@ -377,36 +396,27 @@ def procesar_archivo(
         "duplicados_probables_lista": [],
     }
 
-    # Diccionario de IDs por relación para armar el árbol completo
     ids_por_relacion: dict[str, str] = {}
 
-    # ── Paso 1: insertar/vincular todos los ancestros ──────────────────────────
     for anc in ancestors:
         datos_anc = {
-            "name":                  anc.get("name"),
-            "registration_number":   anc.get("registration_number"),
-            "Horse_Chip":            None,
-            "gender":                anc.get("gender"),
-            "Gait":                  anc.get("Gait"),
+            "name":                   anc.get("name"),
+            "registration_number":    anc.get("registration_number"),
+            "Horse_Chip":             None,
+            "gender":                 anc.get("gender"),
+            "Gait":                   anc.get("Gait"),
             "issuing_association_id": anc.get("issuing_association_id"),
-            "date_of_birth":         anc.get("date_of_birth"),
-            "registration_date":     anc.get("registration_date"),
-            "breeder":               anc.get("breeder"),
-            "owner":                 anc.get("owner"),
-            "place_of_birth":        anc.get("place_of_birth"),
-            "markings":              anc.get("markings"),
+            "date_of_birth":          anc.get("date_of_birth"),
+            "registration_date":      anc.get("registration_date"),
+            "breeder":                anc.get("breeder"),
+            "owner":                  anc.get("owner"),
+            "place_of_birth":         anc.get("place_of_birth"),
+            "markings":               anc.get("markings"),
         }
-        db, anc_id, accion = insertar_o_actualizar(
-            db, datos_anc, resumen["duplicados_probables_lista"]
-        )
-
+        db, anc_id, accion = insertar_o_actualizar(db, datos_anc, resumen["duplicados_probables_lista"])
         rel = anc.get("relationship", "")
         ids_por_relacion[rel] = anc_id
-
-        resumen["ancestros"].append({
-            "nombre": anc.get("name"), "relacion": rel,
-            "accion": accion, "horse_id": anc_id,
-        })
+        resumen["ancestros"].append({"nombre": anc.get("name"), "relacion": rel, "accion": accion, "horse_id": anc_id})
         if accion == "nuevo":
             resumen["nuevos"] += 1
         elif accion == "probable":
@@ -415,23 +425,19 @@ def procesar_archivo(
         else:
             resumen["ancestros_vinculados"] += 1
 
-    # ── Paso 2: vincular abuelos a padre/madre (solo si campos vacíos) ─────────
     if "sire" in ids_por_relacion:
         db = actualizar_parentesco_si_vacio(
-            db,
-            ids_por_relacion["sire"],
+            db, ids_por_relacion["sire"],
             sire_id=ids_por_relacion.get("paternal_grandsire"),
             dam_id=ids_por_relacion.get("paternal_granddam"),
         )
     if "dam" in ids_por_relacion:
         db = actualizar_parentesco_si_vacio(
-            db,
-            ids_por_relacion["dam"],
+            db, ids_por_relacion["dam"],
             sire_id=ids_por_relacion.get("maternal_grandsire"),
             dam_id=ids_por_relacion.get("maternal_granddam"),
         )
 
-    # ── Paso 3: procesar caballo principal ─────────────────────────────────────
     datos_main = {
         "registration_number":    main.get("registration_number"),
         "Horse_Chip":             main.get("Horse_Chip"),
@@ -449,9 +455,7 @@ def procesar_archivo(
         "place_of_birth":         main.get("place_of_birth"),
         "markings":               main.get("markings"),
     }
-    db, main_id, accion = insertar_o_actualizar(
-        db, datos_main, resumen["duplicados_probables_lista"]
-    )
+    db, main_id, accion = insertar_o_actualizar(db, datos_main, resumen["duplicados_probables_lista"])
     resumen["horse_id"] = main_id
     resumen["accion"]   = accion
     if accion == "nuevo":
@@ -502,16 +506,24 @@ for key, val in [("resumenes", None), ("db_sesion", None), ("db_master_snapshot"
     if key not in st.session_state:
         st.session_state[key] = val
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     if LOGO_ICON.exists():
-        st.markdown(
-            "<style>[data-testid='stSidebar'] img { image-rendering: high-quality; }</style>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<style>[data-testid='stSidebar'] img { image-rendering: high-quality; }</style>", unsafe_allow_html=True)
         st.image(str(LOGO_ICON), width=180)
 
     st.divider()
+
+    # ── REQ 7: Advertencia si no hay DB persistente ────────────────────────────
+    if not hay_db_persistente():
+        st.warning(
+            "No se encontró DB Maestra persistente. Se iniciará una DB en blanco. "
+            "Si tienes un respaldo Excel, súbelo en **Restaurar DB Maestra** ↓"
+        )
+
+    # ── Estadísticas DB Maestra ────────────────────────────────────────────────
     db_live    = cargar_master_db()
     total_db   = len(db_live)
     sementales = len(db_live[db_live["gender"] == "Semental"]) if total_db else 0
@@ -525,29 +537,87 @@ with st.sidebar:
 
     if st.session_state.resumenes:
         exitosos = [r for r in st.session_state.resumenes if not r.get("error")]
-        st.metric("Duplicados prevenidos",  sum(r.get("duplicados", 0)           for r in exitosos))
-        st.metric("Ancestros vinculados",   sum(r.get("ancestros_vinculados", 0) for r in exitosos))
-        st.metric("Duplicados probables",   sum(r.get("duplicados_probables", 0) for r in exitosos))
+        st.metric("Duplicados prevenidos", sum(r.get("duplicados", 0)           for r in exitosos))
+        st.metric("Ancestros vinculados",  sum(r.get("ancestros_vinculados", 0) for r in exitosos))
+        st.metric("⚠️ Duplicados probables", sum(r.get("duplicados_probables", 0) for r in exitosos))
 
     st.divider()
-    if MASTER_DB_PATH.exists():
+
+    # ── REQ 6: Descargas de DB Maestra ────────────────────────────────────────
+    st.markdown("### ⬇️ Descargar DB Maestra")
+    if MASTER_XLSX_PATH.exists():
         st.download_button(
-            "⬇️ DB Maestra (.csv)",
-            data=MASTER_DB_PATH.read_bytes(),
+            "📊 Descargar Excel (.xlsx)",
+            data=MASTER_XLSX_PATH.read_bytes(),
+            file_name="GenPaso_Master_DB.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    if MASTER_CSV_PATH.exists():
+        st.download_button(
+            "📄 Descargar CSV (.csv)",
+            data=MASTER_CSV_PATH.read_bytes(),
             file_name="GenPaso_Master_DB.csv",
             mime="text/csv",
             use_container_width=True,
         )
-        if st.button("🗑️ Resetear DB Maestra", use_container_width=True, type="secondary"):
-            MASTER_DB_PATH.unlink()
-            st.rerun()
+    if not MASTER_XLSX_PATH.exists() and not MASTER_CSV_PATH.exists():
+        st.caption("Aún no hay DB guardada.")
+
+    st.divider()
+
+    # ── REQ 5: Restaurar DB desde archivo ─────────────────────────────────────
+    st.markdown("### 📂 Restaurar DB Maestra")
+    st.caption("Sube el Excel o CSV descargado previamente para restaurar la DB.")
+    archivo_restaurar = st.file_uploader(
+        "Subir DB Maestra",
+        type=["xlsx", "csv"],
+        key="uploader_restaurar",
+        label_visibility="collapsed",
+    )
+    if archivo_restaurar:
+        if st.button("✅ Confirmar restauración", use_container_width=True, type="primary"):
+            try:
+                if archivo_restaurar.name.endswith(".xlsx"):
+                    df_rest = pd.read_excel(archivo_restaurar, dtype=str)
+                else:
+                    df_rest = pd.read_csv(archivo_restaurar, dtype=str)
+
+                if "horse_id" not in df_rest.columns or "name" not in df_rest.columns:
+                    st.error("El archivo no tiene las columnas mínimas requeridas (horse_id, name).")
+                else:
+                    guardar_master_db(df_rest)
+                    st.success(f"✅ DB restaurada con {len(df_rest)} registros.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error al restaurar: {e}")
+
+    st.divider()
+
+    # ── REQ 8: Reset con confirmación y backup automático ─────────────────────
+    st.markdown("### ⚠️ Resetear DB Maestra")
+    confirmar_reset = st.checkbox("Confirmo que deseo borrar la DB Maestra actual")
+    if st.button("⚠️ Resetear DB Maestra", use_container_width=True, type="secondary", disabled=not confirmar_reset):
+        backup = backup_master_db()
+        if MASTER_XLSX_PATH.exists():
+            MASTER_XLSX_PATH.unlink()
+        if MASTER_CSV_PATH.exists():
+            MASTER_CSV_PATH.unlink()
+        if backup:
+            st.success(f"DB reseteada. Backup guardado en: `{backup.name}`")
+        else:
+            st.success("DB reseteada. No había archivo previo.")
+        st.rerun()
 
     st.divider()
     if st.button("🚪 Cerrar sesión", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
-# ── Carga de archivos ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CUERPO PRINCIPAL
+# ══════════════════════════════════════════════════════════════════════════════
+
 st.subheader("1. Cargar Documentos")
 archivos = st.file_uploader(
     "Arrastra o selecciona uno o varios registros",
@@ -572,9 +642,9 @@ procesar = st.button(
     use_container_width=True,
 )
 
-# ── Procesamiento en lote ──────────────────────────────────────────────────────
+# ── REQ 4: Procesamiento con guardado inmediato por archivo ───────────────────
 if procesar and archivos:
-    db               = cargar_master_db()
+    db               = cargar_master_db()  # Siempre carga desde archivo persistente
     resumenes        = []
     registros_sesion = []
 
@@ -590,6 +660,9 @@ if procesar and archivos:
             resumenes.append(resumen)
             registros_sesion.append(db[db["horse_id"] == resumen["horse_id"]].copy())
 
+            # Guardado inmediato tras cada archivo exitoso
+            guardar_master_db(db)
+
             with log_container:
                 if resumen["accion"] == "nuevo":
                     icono = "🆕 NUEVO"
@@ -597,7 +670,11 @@ if procesar and archivos:
                     icono = "⚠️ NUEVO (duplicado probable)"
                 else:
                     icono = "🔗 ACTUALIZADO"
-                st.success(f"✅ **{resumen['nombre']}** — {icono} | {len(resumen['ancestros'])} ancestros")
+                st.success(
+                    f"✅ **{resumen['nombre']}** — {icono} | "
+                    f"{len(resumen['ancestros'])} ancestros | "
+                    f"DB Maestra: {len(db)} registros guardados"
+                )
 
         except json.JSONDecodeError:
             resumenes.append({"archivo": archivo.name, "error": "JSON inválido"})
@@ -612,8 +689,7 @@ if procesar and archivos:
             with log_container:
                 st.error(f"❌ {archivo.name}: {e}")
 
-    barra.progress(1.0, text="✅ Procesamiento completo. DB Maestra guardada.")
-    guardar_master_db(db)
+    barra.progress(1.0, text=f"✅ Procesamiento completo — DB Maestra guardada con {len(db)} registros.")
 
     st.session_state.resumenes          = resumenes
     st.session_state.db_sesion          = pd.concat(registros_sesion, ignore_index=True) if registros_sesion else pd.DataFrame(columns=COLUMNAS_MASTER)
@@ -625,12 +701,12 @@ if st.session_state.resumenes:
     st.divider()
     st.subheader("2. Resumen de Procesamiento")
 
-    exitosos             = [r for r in st.session_state.resumenes if not r.get("error")]
-    total_nuevos         = sum(r.get("nuevos", 0)                for r in exitosos)
-    total_duplicados     = sum(r.get("duplicados", 0)            for r in exitosos)
-    total_anc_vinc       = sum(r.get("ancestros_vinculados", 0)  for r in exitosos)
-    total_ancestros      = sum(len(r.get("ancestros", []))        for r in exitosos)
-    total_prob           = sum(r.get("duplicados_probables", 0)  for r in exitosos)
+    exitosos         = [r for r in st.session_state.resumenes if not r.get("error")]
+    total_nuevos     = sum(r.get("nuevos", 0)                for r in exitosos)
+    total_duplicados = sum(r.get("duplicados", 0)            for r in exitosos)
+    total_anc_vinc   = sum(r.get("ancestros_vinculados", 0)  for r in exitosos)
+    total_ancestros  = sum(len(r.get("ancestros", []))        for r in exitosos)
+    total_prob       = sum(r.get("duplicados_probables", 0)  for r in exitosos)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Registros en DB Maestra",   len(cargar_master_db()))
@@ -647,23 +723,15 @@ if st.session_state.resumenes:
         f"**{total_prob}** coincidencias por nombre pendientes de revisión"
     )
 
-    # Detalle genealógico
     with st.expander("Ver detalle de ancestros y vínculos genealógicos"):
         for r in exitosos:
             if r.get("ancestros"):
                 st.markdown(f"**{r['nombre']}** (`{r.get('horse_id','')[:8]}...`)")
                 for anc in r["ancestros"]:
-                    if anc["accion"] == "nuevo":
-                        icono = "🆕"
-                    elif anc["accion"] == "probable":
-                        icono = "⚠️"
-                    else:
-                        icono = "🔗"
-                    st.markdown(
-                        f"  {icono} `{anc['relacion']}` — {anc['nombre']} · `{anc['horse_id'][:8]}...`"
-                    )
+                    icono = "🆕" if anc["accion"] == "nuevo" else ("⚠️" if anc["accion"] == "probable" else "🔗")
+                    st.markdown(f"  {icono} `{anc['relacion']}` — {anc['nombre']} · `{anc['horse_id'][:8]}...`")
 
-    # ── REQ 3: Sección de revisión de duplicados probables ────────────────────
+    # ── Revisión de duplicados probables ──────────────────────────────────────
     todos_probables = []
     for r in exitosos:
         for dp in r.get("duplicados_probables_lista", []):
@@ -675,39 +743,29 @@ if st.session_state.resumenes:
         st.subheader("⚠️ Revisión de Duplicados Probables")
         st.warning(
             f"Se detectaron **{len(todos_probables)}** registro(s) que coinciden solo por **nombre** "
-            "con entradas existentes en la DB. Fueron insertados como nuevos. "
-            "Revisa si son el mismo animal o distintos antes de continuar."
+            "con entradas existentes. Fueron insertados como nuevos. Revisa antes de continuar."
         )
-
         for dp in todos_probables:
-            with st.expander(f"🐴 {dp['nombre']} — archivo: {dp['archivo']}"):
+            with st.expander(f"🐴 {dp['nombre']} — {dp['archivo']}"):
                 col_n, col_e = st.columns(2)
                 with col_n:
                     st.markdown("**Registro NUEVO insertado**")
                     st.code(dp["horse_id_nuevo"])
-                    st.caption("Motivo: " + dp["motivo"])
                 with col_e:
                     st.markdown("**Registro EXISTENTE en DB**")
                     datos_ex = dp.get("coincidencia_datos", {})
                     st.code(dp.get("coincidencia_id", ""))
-                    comparar = [
-                        "registration_number", "Horse_Chip", "gender", "Gait",
-                        "issuing_association_id", "date_of_birth", "registration_date",
-                        "breeder", "owner", "place_of_birth", "markings",
-                    ]
-                    for campo in comparar:
-                        v_ex = datos_ex.get(campo, "—")
-                        st.caption(f"`{campo}`: {v_ex if not _es_vacio(v_ex) else '—'}")
-
+                    for campo in ["registration_number", "Horse_Chip", "gender", "Gait",
+                                  "issuing_association_id", "date_of_birth", "registration_date",
+                                  "breeder", "owner", "place_of_birth", "markings"]:
+                        v = datos_ex.get(campo, "")
+                        st.caption(f"`{campo}`: {v if not _es_vacio(v) else '—'}")
                 st.info(
-                    "Si son el mismo animal: edita el registro nuevo en la tabla de sesión, "
-                    "corrige su `registration_number` o `Horse_Chip` y guarda en DB Maestra. "
-                    "En la próxima carga será reconocido automáticamente como coincidencia fuerte."
+                    "Si son el mismo animal: edita el campo `registration_number` o `Horse_Chip` "
+                    "en la tabla de sesión y guarda en DB Maestra. La próxima carga lo reconocerá automáticamente."
                 )
-                # Placeholder para fusión futura
-                # fusionar_registros(dp["coincidencia_id"], dp["horse_id_nuevo"])
 
-    # ── REQ 1: Editor de sesión con botón guardar correcciones ────────────────
+    # ── Editor de sesión con botón guardar ────────────────────────────────────
     st.divider()
     st.subheader("3. Datos de Esta Sesión")
     df_sesion = st.session_state.db_sesion
@@ -717,20 +775,15 @@ if st.session_state.resumenes:
             use_container_width=True,
             num_rows="fixed",
             key="editor_sesion",
-            column_config={
-                # horse_id visible pero bloqueado
-                "horse_id": st.column_config.TextColumn("horse_id", disabled=True),
-            },
+            column_config={"horse_id": st.column_config.TextColumn("horse_id", disabled=True)},
         )
 
-        # ── Botón guardar correcciones ─────────────────────────────────────────
         if st.button("💾 Guardar correcciones en DB Maestra", type="primary", use_container_width=True):
             actualizados, advertencias = guardar_correcciones_en_master(df_editado)
             if actualizados:
                 st.success(f"✅ {actualizados} registro(s) actualizados en DB Maestra.")
-            if advertencias:
-                for adv in advertencias:
-                    st.warning(f"⚠️ {adv}")
+            for adv in advertencias:
+                st.warning(f"⚠️ {adv}")
             if not actualizados and not advertencias:
                 st.info("No hubo cambios que guardar.")
 
@@ -745,11 +798,11 @@ if st.session_state.resumenes:
                 use_container_width=True,
             )
         with col_b:
-            if st.session_state.db_master_snapshot is not None:
-                st.download_button(
-                    "⬇️ DB Maestra completa (.xlsx)",
-                    data=df_a_excel(st.session_state.db_master_snapshot, "GenPaso_Master_DB"),
-                    file_name="GenPaso_Master_DB.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            db_completa = cargar_master_db()
+            st.download_button(
+                "⬇️ DB Maestra completa (.xlsx)",
+                data=df_a_excel(db_completa, "GenPaso_Master_DB"),
+                file_name="GenPaso_Master_DB.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
