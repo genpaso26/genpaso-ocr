@@ -744,10 +744,11 @@ if procesar and archivos:
             resumenes.append({"archivo": archivo.name, "error": "JSON inválido"})
             with log_container:
                 st.warning(f"⚠️ {archivo.name}: imagen poco legible.")
-        except anthropic.BadRequestError:
-            resumenes.append({"archivo": archivo.name, "error": "Archivo no compatible"})
+        except anthropic.BadRequestError as e:
+            msg = getattr(e, "message", str(e))
+            resumenes.append({"archivo": archivo.name, "error": msg})
             with log_container:
-                st.warning(f"⚠️ {archivo.name}: formato no compatible con la API.")
+                st.warning(f"⚠️ {archivo.name}: {msg}")
         except Exception as e:
             resumenes.append({"archivo": archivo.name, "error": str(e)})
             with log_container:
