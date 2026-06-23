@@ -529,7 +529,7 @@ with col_titulo:
 st.divider()
 
 # ── Estado de sesión ───────────────────────────────────────────────────────────
-for key, val in [("resumenes", None), ("db_sesion", None), ("db_master_snapshot", None)]:
+for key, val in [("resumenes", None), ("db_sesion", None), ("db_master_snapshot", None), ("uploader_key", 0)]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -648,16 +648,25 @@ with st.sidebar:
 LOTE_RECOMENDADO = 50
 LOTE_MAXIMO      = 100
 
-st.subheader("1. Cargar Documentos")
-st.caption(
-    f"Recomendado: hasta **{LOTE_RECOMENDADO} archivos por lote** para garantizar estabilidad. "
-    f"Máximo permitido: {LOTE_MAXIMO} archivos."
-)
+col_titulo_carga, col_limpiar = st.columns([4, 1])
+with col_titulo_carga:
+    st.subheader("1. Cargar Documentos")
+    st.caption(
+        f"Recomendado: hasta **{LOTE_RECOMENDADO} archivos por lote** para garantizar estabilidad. "
+        f"Máximo permitido: {LOTE_MAXIMO} archivos."
+    )
+with col_limpiar:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🗑️ Limpiar archivos", use_container_width=True):
+        st.session_state.uploader_key += 1
+        st.rerun()
+
 archivos = st.file_uploader(
     "Arrastra o selecciona uno o varios registros",
     type=["jpg", "jpeg", "png", "pdf"],
     accept_multiple_files=True,
     label_visibility="collapsed",
+    key=f"uploader_{st.session_state.uploader_key}",
 )
 
 if archivos:
