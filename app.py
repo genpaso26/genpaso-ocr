@@ -354,13 +354,27 @@ def obtener_cliente() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
+def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
+    """Convierte cada página del PDF a PNG y devuelve bloques de imagen para la API."""
+    import fitz  # PyMuPDF
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    bloques = []
+    for page in doc:
+        pix     = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom para legibilidad
+        img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode("utf-8")
+        bloques.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}})
+    doc.close()
+    return bloques
+
+
 def construir_contenido(archivo_bytes: bytes, media_type: str) -> list:
-    datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
     if media_type == "application/pdf":
-        bloque = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": datos_b64}}
+        # Convertir páginas a imágenes: funciona con PDFs escaneados, cifrados u otros formatos
+        bloques = _pdf_a_imagenes(archivo_bytes)
     else:
-        bloque = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}
-    return [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]
+        datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
+        bloques = [{"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}]
+    return bloques + [{"type": "text", "text": PROMPT_EXTRACCION}]
 
 
 def llamar_api(archivo_bytes: bytes, media_type: str) -> dict:
