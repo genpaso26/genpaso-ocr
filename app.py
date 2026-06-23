@@ -645,13 +645,41 @@ with st.sidebar:
 # CUERPO PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
+LOTE_RECOMENDADO = 50
+LOTE_MAXIMO      = 100
+
 st.subheader("1. Cargar Documentos")
+st.caption(
+    f"Recomendado: hasta **{LOTE_RECOMENDADO} archivos por lote** para garantizar estabilidad. "
+    f"Máximo permitido: {LOTE_MAXIMO} archivos."
+)
 archivos = st.file_uploader(
     "Arrastra o selecciona uno o varios registros",
     type=["jpg", "jpeg", "png", "pdf"],
     accept_multiple_files=True,
     label_visibility="collapsed",
 )
+
+if archivos:
+    n        = len(archivos)
+    tam_mb   = sum(a.size for a in archivos) / 1_048_576
+
+    col_info1, col_info2, col_info3 = st.columns(3)
+    col_info1.metric("Archivos seleccionados", n)
+    col_info2.metric("Tamaño total", f"{tam_mb:.1f} MB")
+    col_info3.metric("Lote recomendado", f"≤ {LOTE_RECOMENDADO}")
+
+    if n > LOTE_MAXIMO:
+        st.error(
+            f"Has seleccionado {n} archivos. Por estabilidad, procesa máximo {LOTE_MAXIMO} por vez. "
+            "Divide los archivos en grupos y sube cada grupo por separado."
+        )
+        archivos = []
+    elif n > LOTE_RECOMENDADO:
+        st.warning(
+            f"Tienes {n} archivos seleccionados. Se procesarán todos, pero si experimentas "
+            f"lentitud o errores te recomendamos subir en grupos de {LOTE_RECOMENDADO}."
+        )
 
 if archivos:
     cols = st.columns(min(len(archivos), 4))
