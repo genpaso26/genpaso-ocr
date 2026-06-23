@@ -355,12 +355,12 @@ def obtener_cliente() -> anthropic.Anthropic:
 
 
 def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
-    """Convierte cada página del PDF a PNG y devuelve bloques de imagen para la API."""
+    """Convierte cada página del PDF a PNG (fallback para PDFs que la API rechaza)."""
     import fitz  # PyMuPDF
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc     = fitz.open(stream=pdf_bytes, filetype="pdf")
     bloques = []
     for page in doc:
-        pix     = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom para legibilidad
+        pix     = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
         img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode("utf-8")
         bloques.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}})
     doc.close()
@@ -368,22 +368,33 @@ def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
 
 
 def construir_contenido(archivo_bytes: bytes, media_type: str) -> list:
+    datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
     if media_type == "application/pdf":
-        # Convertir páginas a imágenes: funciona con PDFs escaneados, cifrados u otros formatos
-        bloques = _pdf_a_imagenes(archivo_bytes)
+        bloque = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": datos_b64}}
     else:
-        datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
-        bloques = [{"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}]
-    return bloques + [{"type": "text", "text": PROMPT_EXTRACCION}]
+        bloque = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}
+    return [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]
 
 
 def llamar_api(archivo_bytes: bytes, media_type: str) -> dict:
     cliente = obtener_cliente()
-    respuesta = cliente.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        messages=[{"role": "user", "content": construir_contenido(archivo_bytes, media_type)}],
-    )
+    try:
+        respuesta = cliente.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": construir_contenido(archivo_bytes, media_type)}],
+        )
+    except anthropic.BadRequestError:
+        if media_type == "application/pdf":
+            # Fallback: renderizar cada página como imagen con PyMuPDF
+            bloques = _pdf_a_imagenes(archivo_bytes) + [{"type": "text", "text": PROMPT_EXTRACCION}]
+            respuesta = cliente.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                messages=[{"role": "user", "content": bloques}],
+            )
+        else:
+            raise
     texto = respuesta.content[0].text.strip()
     if texto.startswith("```"):
         lineas = texto.splitlines()
