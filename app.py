@@ -367,26 +367,28 @@ def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
     return bloques
 
 
-def construir_contenido(archivo_bytes: bytes, media_type: str) -> list:
+def construir_contenido(archivo_bytes: bytes, media_type: str, filename: str = "") -> list:
+    es_pdf = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
-    if media_type == "application/pdf":
+    if es_pdf:
         bloque = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": datos_b64}}
     else:
         bloque = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}
     return [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]
 
 
-def llamar_api(archivo_bytes: bytes, media_type: str) -> dict:
+def llamar_api(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
     cliente = obtener_cliente()
+    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     try:
         respuesta = cliente.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=2048,
-            messages=[{"role": "user", "content": construir_contenido(archivo_bytes, media_type)}],
+            messages=[{"role": "user", "content": construir_contenido(archivo_bytes, media_type, filename)}],
         )
     except anthropic.BadRequestError:
-        if media_type == "application/pdf":
-            # Fallback: renderizar cada página como imagen con PyMuPDF
+        if es_pdf:
+            # Fallback: renderizar páginas como imágenes PNG con PyMuPDF
             bloques = _pdf_a_imagenes(archivo_bytes) + [{"type": "text", "text": PROMPT_EXTRACCION}]
             respuesta = cliente.messages.create(
                 model="claude-sonnet-4-6",
@@ -407,9 +409,9 @@ def llamar_api(archivo_bytes: bytes, media_type: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def procesar_archivo(
-    archivo_bytes: bytes, media_type: str, db: pd.DataFrame
+    archivo_bytes: bytes, media_type: str, db: pd.DataFrame, filename: str = ""
 ) -> tuple[pd.DataFrame, dict]:
-    resultado = llamar_api(archivo_bytes, media_type)
+    resultado = llamar_api(archivo_bytes, media_type, filename)
     main      = resultado.get("main", {})
     ancestors = resultado.get("ancestors", [])
 
@@ -679,7 +681,7 @@ if procesar and archivos:
     for i, archivo in enumerate(archivos):
         barra.progress(i / len(archivos), text=f"Procesando {archivo.name} ({i+1}/{len(archivos)})...")
         try:
-            db, resumen = procesar_archivo(archivo.read(), archivo.type, db)
+            db, resumen = procesar_archivo(archivo.read(), archivo.type, db, archivo.name)
             resumen["archivo"] = archivo.name
             resumen["error"]   = None
             resumenes.append(resumen)
