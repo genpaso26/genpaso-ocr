@@ -1,6 +1,6 @@
 """
-GenPaso OCR v6 — Persistencia robusta con Excel + CSV de respaldo,
-                  restauración manual y reset con confirmación.
+GenPaso OCR v7 — Soporte dual de proveedores: Google Gemini (principal, capa gratuita)
+                  y Anthropic Claude (respaldo). Persistencia robusta con Excel + CSV.
 
 NOTA TÉCNICA: En Streamlit Community Cloud el filesystem es efímero y puede
 resetearse en reinicios o redeploys. Esta versión mitiga el problema con:
@@ -23,9 +23,11 @@ from io import BytesIO
 from pathlib import Path
 
 import anthropic
+import google.generativeai as genai
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from PIL import Image
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -336,27 +338,38 @@ def insertar_o_actualizar(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# API CLAUDE
+# API — GEMINI (principal) + ANTHROPIC (respaldo)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def obtener_api_key() -> str:
+GEMINI_MODEL    = "gemini-2.0-flash"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+
+def _obtener_secret(clave: str) -> str:
     try:
-        return st.secrets.get("ANTHROPIC_API_KEY", "")
+        return st.secrets.get(clave, "")
     except Exception:
-        return os.getenv("ANTHROPIC_API_KEY", "")
+        return os.getenv(clave, "")
 
 
-def obtener_cliente() -> anthropic.Anthropic:
-    api_key = obtener_api_key()
-    if not api_key:
-        st.error("No se encontró ANTHROPIC_API_KEY. Configúrala en Secrets o .env")
-        st.stop()
-    return anthropic.Anthropic(api_key=api_key)
+# ── Utilidades PDF ─────────────────────────────────────────────────────────────
+
+def _pdf_a_pil(pdf_bytes: bytes) -> list[Image.Image]:
+    """Convierte páginas de PDF a PIL Images (para Gemini)."""
+    import fitz
+    doc    = fitz.open(stream=pdf_bytes, filetype="pdf")
+    imgs   = []
+    for page in doc:
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        imgs.append(img)
+    doc.close()
+    return imgs
 
 
-def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
-    """Convierte cada página del PDF a PNG (fallback para PDFs que la API rechaza)."""
-    import fitz  # PyMuPDF
+def _pdf_a_bloques_anthropic(pdf_bytes: bytes) -> list:
+    """Convierte páginas de PDF a bloques base64 (para Anthropic)."""
+    import fitz
     doc     = fitz.open(stream=pdf_bytes, filetype="pdf")
     bloques = []
     for page in doc:
@@ -367,41 +380,79 @@ def _pdf_a_imagenes(pdf_bytes: bytes) -> list:
     return bloques
 
 
-def construir_contenido(archivo_bytes: bytes, media_type: str, filename: str = "") -> list:
+# ── Gemini ─────────────────────────────────────────────────────────────────────
+
+def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
+    api_key = _obtener_secret("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
+
+    genai.configure(api_key=api_key)
+    modelo = genai.GenerativeModel(GEMINI_MODEL)
     es_pdf = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
+
+    if es_pdf:
+        partes = _pdf_a_pil(archivo_bytes) + [PROMPT_EXTRACCION]
+    else:
+        img    = Image.open(BytesIO(archivo_bytes))
+        partes = [img, PROMPT_EXTRACCION]
+
+    respuesta = modelo.generate_content(partes)
+    texto     = respuesta.text.strip()
+    if texto.startswith("```"):
+        lineas = texto.splitlines()
+        texto  = "\n".join(lineas[1:-1] if lineas[-1].strip() == "```" else lineas[1:])
+    return json.loads(texto)
+
+
+# ── Anthropic ──────────────────────────────────────────────────────────────────
+
+def llamar_api_anthropic(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
+    api_key = _obtener_secret("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("No se encontró ANTHROPIC_API_KEY en Secrets o .env")
+
+    cliente = anthropic.Anthropic(api_key=api_key)
+    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
+
     if es_pdf:
         bloque = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": datos_b64}}
     else:
         bloque = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}
-    return [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]
 
-
-def llamar_api(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
-    cliente = obtener_cliente()
-    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     try:
         respuesta = cliente.messages.create(
-            model="claude-sonnet-4-6",
+            model=ANTHROPIC_MODEL,
             max_tokens=2048,
-            messages=[{"role": "user", "content": construir_contenido(archivo_bytes, media_type, filename)}],
+            messages=[{"role": "user", "content": [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]}],
         )
     except anthropic.BadRequestError:
         if es_pdf:
-            # Fallback: renderizar páginas como imágenes PNG con PyMuPDF
-            bloques = _pdf_a_imagenes(archivo_bytes) + [{"type": "text", "text": PROMPT_EXTRACCION}]
+            bloques = _pdf_a_bloques_anthropic(archivo_bytes) + [{"type": "text", "text": PROMPT_EXTRACCION}]
             respuesta = cliente.messages.create(
-                model="claude-sonnet-4-6",
+                model=ANTHROPIC_MODEL,
                 max_tokens=2048,
                 messages=[{"role": "user", "content": bloques}],
             )
         else:
             raise
+
     texto = respuesta.content[0].text.strip()
     if texto.startswith("```"):
         lineas = texto.splitlines()
-        texto = "\n".join(lineas[1:-1] if lineas[-1].strip() == "```" else lineas[1:])
+        texto  = "\n".join(lineas[1:-1] if lineas[-1].strip() == "```" else lineas[1:])
     return json.loads(texto)
+
+
+# ── Despachador principal ──────────────────────────────────────────────────────
+
+def llamar_api(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
+    proveedor = st.session_state.get("proveedor", "Gemini")
+    if proveedor == "Gemini":
+        return llamar_api_gemini(archivo_bytes, media_type, filename)
+    else:
+        return llamar_api_anthropic(archivo_bytes, media_type, filename)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -540,6 +591,31 @@ with st.sidebar:
     if LOGO_ICON.exists():
         st.markdown("<style>[data-testid='stSidebar'] img { image-rendering: high-quality; }</style>", unsafe_allow_html=True)
         st.image(str(LOGO_ICON), width=180)
+
+    st.divider()
+
+    # ── Selector de proveedor de IA ────────────────────────────────────────────
+    st.markdown("### 🤖 Proveedor de IA")
+    proveedor = st.radio(
+        "Proveedor",
+        ["Gemini", "Anthropic"],
+        index=0,
+        horizontal=True,
+        captions=["Gratuito / bajo costo", "Respaldo"],
+        label_visibility="collapsed",
+    )
+    st.session_state.proveedor = proveedor
+
+    if proveedor == "Gemini":
+        if not _obtener_secret("GOOGLE_API_KEY"):
+            st.warning("⚠️ Falta GOOGLE_API_KEY en Secrets.")
+        else:
+            st.caption(f"✅ Gemini · modelo: `{GEMINI_MODEL}`")
+    else:
+        if not _obtener_secret("ANTHROPIC_API_KEY"):
+            st.warning("⚠️ Falta ANTHROPIC_API_KEY en Secrets.")
+        else:
+            st.caption(f"✅ Anthropic · modelo: `{ANTHROPIC_MODEL}`")
 
     st.divider()
 
