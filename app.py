@@ -397,16 +397,22 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
         img    = Image.open(BytesIO(archivo_bytes))
         partes = [img, PROMPT_EXTRACCION]
 
-    # Reintento automático si hay 429 (cuota por minuto agotada)
-    for intento in range(4):
+    # Reintento automático si hay 429
+    for intento in range(3):
         try:
             respuesta = cliente.models.generate_content(model=GEMINI_MODEL, contents=partes)
             break
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower() or "rate" in str(e).lower():
-                espera = 15 * (intento + 1)
-                time.sleep(espera)
-                if intento == 3:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                # Extraer retryDelay del mensaje si está disponible
+                import re
+                m      = re.search(r"retry.*?(\d+)s", err, re.IGNORECASE)
+                espera = int(m.group(1)) if m else 30
+                espera = min(espera, 60)
+                if intento < 2:
+                    time.sleep(espera)
+                else:
                     raise
             else:
                 raise
@@ -815,10 +821,6 @@ if procesar and archivos:
 
             # Guardado inmediato tras cada archivo exitoso
             guardar_master_db(db)
-
-            # Pausa entre llamadas para respetar límite de Gemini (15 req/min)
-            if st.session_state.get("proveedor", "Gemini") == "Gemini" and i < len(archivos) - 1:
-                time.sleep(4)
 
             with log_container:
                 if resumen["accion"] == "nuevo":
