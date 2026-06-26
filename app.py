@@ -367,24 +367,22 @@ def _redimensionar(img: Image.Image) -> Image.Image:
     return img
 
 
-def _pdf_a_pil(pdf_bytes: bytes) -> list[Image.Image]:
-    """Convierte páginas de PDF a PIL Images (para Gemini). Máx 3 páginas, JPEG ligero."""
+def _pdf_a_jpeg_bytes(pdf_bytes: bytes) -> list[bytes]:
+    """Convierte páginas de PDF a lista de bytes JPEG (para Gemini). Máx 3 páginas."""
     import fitz
-    doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
-    imgs = []
+    doc    = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result = []
     for i, page in enumerate(doc):
         if i >= MAX_PAGINAS:
             break
         pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         img = _redimensionar(img)
-        # Convertir a JPEG en memoria para reducir tamaño de payload
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=85)
-        buf.seek(0)
-        imgs.append(Image.open(buf))
+        result.append(buf.getvalue())  # bytes completos, sin lazy loading
     doc.close()
-    return imgs
+    return result
 
 
 def _pdf_a_bloques_anthropic(pdf_bytes: bytes) -> list:
@@ -413,14 +411,19 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     if not api_key:
         raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
 
+    from google.genai import types as gtypes
+
     cliente = google_genai.Client(api_key=api_key)
     es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
 
     if es_pdf:
-        partes = _pdf_a_pil(archivo_bytes) + [PROMPT_EXTRACCION]
+        paginas = _pdf_a_jpeg_bytes(archivo_bytes)
+        partes  = [gtypes.Part.from_bytes(data=p, mime_type="image/jpeg") for p in paginas]
+        partes  += [PROMPT_EXTRACCION]
     else:
-        img    = Image.open(BytesIO(archivo_bytes))
-        partes = [img, PROMPT_EXTRACCION]
+        img_bytes = archivo_bytes
+        mt        = media_type if media_type.startswith("image/") else "image/jpeg"
+        partes    = [gtypes.Part.from_bytes(data=img_bytes, mime_type=mt), PROMPT_EXTRACCION]
 
     # Reintento automático si hay 429
     for intento in range(3):
