@@ -342,7 +342,7 @@ def insertar_o_actualizar(
 # API — GEMINI (principal) + ANTHROPIC (respaldo)
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL    = "gemini-2.0-flash-001"
+GEMINI_MODEL    = "gemini-2.5-flash"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 
