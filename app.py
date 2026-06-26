@@ -24,7 +24,7 @@ from io import BytesIO
 from pathlib import Path
 
 import anthropic
-import google.generativeai as genai
+from google import genai as google_genai
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -342,7 +342,7 @@ def insertar_o_actualizar(
 # API — GEMINI (principal) + ANTHROPIC (respaldo)
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL    = "gemini-1.5-flash"
+GEMINI_MODEL    = "gemini-2.0-flash"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 
@@ -388,9 +388,8 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     if not api_key:
         raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
 
-    genai.configure(api_key=api_key)
-    modelo = genai.GenerativeModel(GEMINI_MODEL)
-    es_pdf = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
+    cliente = google_genai.Client(api_key=api_key)
+    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
 
     if es_pdf:
         partes = _pdf_a_pil(archivo_bytes) + [PROMPT_EXTRACCION]
@@ -401,11 +400,11 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     # Reintento automático si hay 429 (cuota por minuto agotada)
     for intento in range(4):
         try:
-            respuesta = modelo.generate_content(partes)
+            respuesta = cliente.models.generate_content(model=GEMINI_MODEL, contents=partes)
             break
         except Exception as e:
             if "429" in str(e) or "quota" in str(e).lower() or "rate" in str(e).lower():
-                espera = 15 * (intento + 1)  # 15s, 30s, 45s, 60s
+                espera = 15 * (intento + 1)
                 time.sleep(espera)
                 if intento == 3:
                     raise
@@ -624,7 +623,7 @@ with st.sidebar:
         if not _obtener_secret("GOOGLE_API_KEY"):
             st.warning("⚠️ Falta GOOGLE_API_KEY en Secrets.")
         else:
-            st.caption(f"✅ Gemini · modelo: `{GEMINI_MODEL}`")
+            st.caption(f"✅ Gemini (google-genai) · modelo: `{GEMINI_MODEL}`")
     else:
         if not _obtener_secret("ANTHROPIC_API_KEY"):
             st.warning("⚠️ Falta ANTHROPIC_API_KEY en Secrets.")
