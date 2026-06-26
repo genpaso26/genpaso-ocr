@@ -355,28 +355,53 @@ def _obtener_secret(clave: str) -> str:
 
 # ── Utilidades PDF ─────────────────────────────────────────────────────────────
 
+MAX_PAGINAS = 3
+MAX_PX      = 1200  # ancho/alto máximo para mantener imágenes ligeras
+
+
+def _redimensionar(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    if max(w, h) > MAX_PX:
+        factor = MAX_PX / max(w, h)
+        img = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
+    return img
+
+
 def _pdf_a_pil(pdf_bytes: bytes) -> list[Image.Image]:
-    """Convierte páginas de PDF a PIL Images (para Gemini)."""
+    """Convierte páginas de PDF a PIL Images (para Gemini). Máx 3 páginas, JPEG ligero."""
     import fitz
-    doc    = fitz.open(stream=pdf_bytes, filetype="pdf")
-    imgs   = []
-    for page in doc:
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+    doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
+    imgs = []
+    for i, page in enumerate(doc):
+        if i >= MAX_PAGINAS:
+            break
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        imgs.append(img)
+        img = _redimensionar(img)
+        # Convertir a JPEG en memoria para reducir tamaño de payload
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        imgs.append(Image.open(buf))
     doc.close()
     return imgs
 
 
 def _pdf_a_bloques_anthropic(pdf_bytes: bytes) -> list:
-    """Convierte páginas de PDF a bloques base64 (para Anthropic)."""
+    """Convierte páginas de PDF a bloques base64 JPEG (para Anthropic)."""
     import fitz
     doc     = fitz.open(stream=pdf_bytes, filetype="pdf")
     bloques = []
-    for page in doc:
-        pix     = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-        img_b64 = base64.standard_b64encode(pix.tobytes("png")).decode("utf-8")
-        bloques.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}})
+    for i, page in enumerate(doc):
+        if i >= MAX_PAGINAS:
+            break
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img = _redimensionar(img)
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        img_b64 = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+        bloques.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
     doc.close()
     return bloques
 
