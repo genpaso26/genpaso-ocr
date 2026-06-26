@@ -17,6 +17,7 @@ Para persistencia 100% permanente se recomienda integrar una DB externa:
 import base64
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -397,8 +398,21 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
         img    = Image.open(BytesIO(archivo_bytes))
         partes = [img, PROMPT_EXTRACCION]
 
-    respuesta = modelo.generate_content(partes)
-    texto     = respuesta.text.strip()
+    # Reintento automático si hay 429 (cuota por minuto agotada)
+    for intento in range(4):
+        try:
+            respuesta = modelo.generate_content(partes)
+            break
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower() or "rate" in str(e).lower():
+                espera = 15 * (intento + 1)  # 15s, 30s, 45s, 60s
+                time.sleep(espera)
+                if intento == 3:
+                    raise
+            else:
+                raise
+
+    texto = respuesta.text.strip()
     if texto.startswith("```"):
         lineas = texto.splitlines()
         texto  = "\n".join(lineas[1:-1] if lineas[-1].strip() == "```" else lineas[1:])
@@ -802,6 +816,10 @@ if procesar and archivos:
 
             # Guardado inmediato tras cada archivo exitoso
             guardar_master_db(db)
+
+            # Pausa entre llamadas para respetar límite de Gemini (15 req/min)
+            if st.session_state.get("proveedor", "Gemini") == "Gemini" and i < len(archivos) - 1:
+                time.sleep(4)
 
             with log_container:
                 if resumen["accion"] == "nuevo":
