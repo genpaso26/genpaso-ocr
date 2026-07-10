@@ -555,7 +555,7 @@ def df_a_excel(df: pd.DataFrame, sheet_name: str = "GenPaso") -> bytes:
 
 st.set_page_config(
     page_title="GenPaso OCR",
-    page_icon=str(LOGO_ICON) if LOGO_ICON.exists() else "🐴",
+    page_icon="🐴",
     layout="wide",
 )
 
