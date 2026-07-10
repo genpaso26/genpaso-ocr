@@ -24,7 +24,6 @@ from io import BytesIO
 from pathlib import Path
 
 import anthropic
-from google import genai as google_genai
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -411,7 +410,11 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     if not api_key:
         raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
 
-    from google.genai import types as gtypes
+    try:
+        from google import genai as google_genai
+        from google.genai import types as gtypes
+    except ImportError:
+        raise RuntimeError("Paquete google-genai no disponible. Verifica requirements.txt y espera el redeploy.")
 
     cliente = google_genai.Client(api_key=api_key)
     es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
