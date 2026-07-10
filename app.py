@@ -796,8 +796,14 @@ archivos = st.file_uploader(
 )
 
 if archivos:
-    n        = len(archivos)
-    tam_mb   = sum(a.size for a in archivos) / 1_048_576
+    n = len(archivos)
+    try:
+        tam_mb = sum(a.size for a in archivos) / 1_048_576
+    except Exception:
+        try:
+            tam_mb = sum(len(a.getvalue()) for a in archivos) / 1_048_576
+        except Exception:
+            tam_mb = 0
 
     col_info1, col_info2, col_info3 = st.columns(3)
     col_info1.metric("Archivos seleccionados", n)
@@ -820,9 +826,12 @@ if archivos:
     cols = st.columns(min(len(archivos), 4))
     for i, arch in enumerate(archivos):
         with cols[i % 4]:
-            if arch.type.startswith("image/"):
-                st.image(arch, caption=arch.name, use_container_width=True)
-            else:
+            try:
+                if arch.type and arch.type.startswith("image/"):
+                    st.image(arch, caption=arch.name, use_container_width=True)
+                else:
+                    st.info(f"📄 {arch.name}")
+            except Exception:
                 st.info(f"📄 {arch.name}")
 
 procesar = st.button(
