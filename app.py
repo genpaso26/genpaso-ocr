@@ -354,53 +354,6 @@ def _obtener_secret(clave: str) -> str:
 
 # ── Utilidades PDF ─────────────────────────────────────────────────────────────
 
-MAX_PAGINAS = 3
-MAX_PX      = 1200  # ancho/alto máximo para mantener imágenes ligeras
-
-
-def _redimensionar(img: Image.Image) -> Image.Image:
-    w, h = img.size
-    if max(w, h) > MAX_PX:
-        factor = MAX_PX / max(w, h)
-        img = img.resize((int(w * factor), int(h * factor)), Image.LANCZOS)
-    return img
-
-
-def _pdf_a_jpeg_bytes(pdf_bytes: bytes) -> list[bytes]:
-    """Convierte páginas de PDF a lista de bytes JPEG (para Gemini). Máx 3 páginas."""
-    import fitz
-    doc    = fitz.open(stream=pdf_bytes, filetype="pdf")
-    result = []
-    for i, page in enumerate(doc):
-        if i >= MAX_PAGINAS:
-            break
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        img = _redimensionar(img)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        result.append(buf.getvalue())  # bytes completos, sin lazy loading
-    doc.close()
-    return result
-
-
-def _pdf_a_bloques_anthropic(pdf_bytes: bytes) -> list:
-    """Convierte páginas de PDF a bloques base64 JPEG (para Anthropic)."""
-    import fitz
-    doc     = fitz.open(stream=pdf_bytes, filetype="pdf")
-    bloques = []
-    for i, page in enumerate(doc):
-        if i >= MAX_PAGINAS:
-            break
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        img = _redimensionar(img)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        img_b64 = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
-        bloques.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
-    doc.close()
-    return bloques
 
 
 # ── Gemini ─────────────────────────────────────────────────────────────────────
@@ -417,16 +370,9 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
         raise RuntimeError("Paquete google-genai no disponible. Verifica requirements.txt y espera el redeploy.")
 
     cliente = google_genai.Client(api_key=api_key)
-    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
-
-    if es_pdf:
-        paginas = _pdf_a_jpeg_bytes(archivo_bytes)
-        partes  = [gtypes.Part.from_bytes(data=p, mime_type="image/jpeg") for p in paginas]
-        partes  += [PROMPT_EXTRACCION]
-    else:
-        img_bytes = archivo_bytes
-        mt        = media_type if media_type.startswith("image/") else "image/jpeg"
-        partes    = [gtypes.Part.from_bytes(data=img_bytes, mime_type=mt), PROMPT_EXTRACCION]
+    es_pdf = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
+    mt     = "application/pdf" if es_pdf else (media_type if media_type.startswith("image/") else "image/jpeg")
+    partes = [gtypes.Part.from_bytes(data=archivo_bytes, mime_type=mt), PROMPT_EXTRACCION]
 
     # Reintento automático si hay 429
     for intento in range(3):
@@ -463,30 +409,17 @@ def llamar_api_anthropic(archivo_bytes: bytes, media_type: str, filename: str = 
         raise ValueError("No se encontró ANTHROPIC_API_KEY en Secrets o .env")
 
     cliente = anthropic.Anthropic(api_key=api_key)
-    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
+    es_pdf    = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     datos_b64 = base64.standard_b64encode(archivo_bytes).decode("utf-8")
+    mt        = "application/pdf" if es_pdf else media_type
+    tipo      = "document" if es_pdf else "image"
+    bloque    = {"type": tipo, "source": {"type": "base64", "media_type": mt, "data": datos_b64}}
 
-    if es_pdf:
-        bloque = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": datos_b64}}
-    else:
-        bloque = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": datos_b64}}
-
-    try:
-        respuesta = cliente.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]}],
-        )
-    except anthropic.BadRequestError:
-        if es_pdf:
-            bloques = _pdf_a_bloques_anthropic(archivo_bytes) + [{"type": "text", "text": PROMPT_EXTRACCION}]
-            respuesta = cliente.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": bloques}],
-            )
-        else:
-            raise
+    respuesta = cliente.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": [bloque, {"type": "text", "text": PROMPT_EXTRACCION}]}],
+    )
 
     texto = respuesta.content[0].text.strip()
     if texto.startswith("```"):
