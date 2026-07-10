@@ -441,7 +441,7 @@ def llamar_api_anthropic(archivo_bytes: bytes, media_type: str, filename: str = 
 # ── Despachador principal ──────────────────────────────────────────────────────
 
 def llamar_api(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
-    proveedor = st.session_state.get("proveedor", "Gemini")
+    proveedor = st.session_state.get("proveedor", "Anthropic")
     if proveedor == "Gemini":
         return llamar_api_gemini(archivo_bytes, media_type, filename)
     else:
@@ -590,7 +590,7 @@ with st.sidebar:
     proveedor = st.radio(
         "Proveedor",
         ["Gemini", "Anthropic"],
-        index=0,
+        index=1,
         horizontal=True,
         captions=["Gratuito / bajo costo", "Respaldo"],
         label_visibility="collapsed",
