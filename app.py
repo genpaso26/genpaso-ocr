@@ -27,9 +27,20 @@ import anthropic
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image
 
 load_dotenv(Path(__file__).parent / ".env")
+
+
+def mostrar_imagen(path: Path, width: str = "100%", extra_css: str = "") -> None:
+    """Muestra una imagen como HTML base64 — no usa PIL ni st.image."""
+    if not path.exists():
+        return
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    data = base64.b64encode(path.read_bytes()).decode()
+    st.markdown(
+        f'<img src="data:{mime};base64,{data}" style="width:{width};max-width:100%;{extra_css}">',
+        unsafe_allow_html=True,
+    )
 
 # ── Rutas ──────────────────────────────────────────────────────────────────────
 
@@ -118,8 +129,7 @@ def obtener_usuarios() -> dict:
 def pantalla_login():
     col_l, col_c, col_r = st.columns([1, 1.5, 1])
     with col_c:
-        if LOGO_TYPO.exists():
-            st.image(str(LOGO_TYPO), use_container_width=True)
+        mostrar_imagen(LOGO_TYPO)
         st.markdown("### 🔐 Acceso Restringido")
         st.caption("Solo personal autorizado de GenPaso")
         with st.form("login_form"):
@@ -554,8 +564,7 @@ verificar_autenticacion()
 # ── Header ─────────────────────────────────────────────────────────────────────
 col_logo, col_titulo = st.columns([1, 4], gap="medium")
 with col_logo:
-    if LOGO_TYPO.exists():
-        st.image(str(LOGO_TYPO), use_container_width=True)
+    mostrar_imagen(LOGO_TYPO)
 with col_titulo:
     st.markdown("## Ingesta Masiva de Registros Equinos")
     st.caption(f"Base de datos genética GenPaso · Usuario: **{st.session_state.get('usuario_activo', '')}**")
@@ -572,8 +581,7 @@ for key, val in [("resumenes", None), ("db_sesion", None), ("db_master_snapshot"
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     if LOGO_ICON.exists():
-        if LOGO_ICON.exists():
-            st.image(str(LOGO_ICON), width=180)
+        mostrar_imagen(LOGO_ICON, width="180px")
 
     st.divider()
 
@@ -761,7 +769,7 @@ if archivos:
         with cols[i % 4]:
             try:
                 if arch.type and arch.type.startswith("image/"):
-                    st.image(arch, caption=arch.name, use_container_width=True)
+                    st.info(f"🖼️ {arch.name}")
                 else:
                     st.info(f"📄 {arch.name}")
             except Exception:
