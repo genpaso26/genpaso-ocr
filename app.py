@@ -27,7 +27,6 @@ import anthropic
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -118,8 +117,7 @@ def obtener_usuarios() -> dict:
 def pantalla_login():
     col_l, col_c, col_r = st.columns([1, 1.5, 1])
     with col_c:
-        if LOGO_TYPO.exists():
-            st.image(str(LOGO_TYPO), use_container_width=True)
+        st.markdown("### 🐴 GenPaso OCR")
         st.markdown("### 🔐 Acceso Restringido")
         st.caption("Solo personal autorizado de GenPaso")
         with st.form("login_form"):
@@ -554,8 +552,7 @@ verificar_autenticacion()
 # ── Header ─────────────────────────────────────────────────────────────────────
 col_logo, col_titulo = st.columns([1, 4], gap="medium")
 with col_logo:
-    if LOGO_TYPO.exists():
-        st.image(str(LOGO_TYPO), use_container_width=True)
+    st.markdown("### 🐴")
 with col_titulo:
     st.markdown("## Ingesta Masiva de Registros Equinos")
     st.caption(f"Base de datos genética GenPaso · Usuario: **{st.session_state.get('usuario_activo', '')}**")
@@ -572,8 +569,7 @@ for key, val in [("resumenes", None), ("db_sesion", None), ("db_master_snapshot"
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     if LOGO_ICON.exists():
-        st.markdown("<style>[data-testid='stSidebar'] img { image-rendering: high-quality; }</style>", unsafe_allow_html=True)
-        st.image(str(LOGO_ICON), width=180)
+        st.markdown("## 🐴 GenPaso")
 
     st.divider()
 
@@ -761,7 +757,7 @@ if archivos:
         with cols[i % 4]:
             try:
                 if arch.type and arch.type.startswith("image/"):
-                    st.image(arch, caption=arch.name, use_container_width=True)
+                    st.info(f"🖼️ {arch.name}")
                 else:
                     st.info(f"📄 {arch.name}")
             except Exception:
