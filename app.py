@@ -783,6 +783,11 @@ procesar = st.button(
 )
 
 # ── REQ 4: Procesamiento con guardado inmediato por archivo ───────────────────
+if procesar:
+    if not archivos:
+        st.error("❌ No hay archivos cargados. Sube al menos un archivo antes de procesar.")
+        st.stop()
+
 if procesar and archivos:
     db               = cargar_master_db()  # Siempre carga desde archivo persistente
     resumenes        = []
