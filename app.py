@@ -435,45 +435,44 @@ def _obtener_secret(clave: str) -> str:
 
 
 
-# ── Gemini ─────────────────────────────────────────────────────────────────────
+# ── Gemini (REST API directa — sin google-genai) ───────────────────────────────
 
 def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
+    """Llama a Gemini via REST API con httpx. No requiere google-genai instalado."""
+    import httpx
+    import re
+
     api_key = _obtener_secret("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
 
-    try:
-        from google import genai as google_genai
-        from google.genai import types as gtypes
-    except ImportError:
-        raise RuntimeError("Paquete google-genai no disponible. Verifica requirements.txt y espera el redeploy.")
+    es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
+    mt      = "application/pdf" if es_pdf else (media_type if media_type.startswith("image/") else "image/jpeg")
+    b64data = base64.b64encode(archivo_bytes).decode()
 
-    cliente = google_genai.Client(api_key=api_key)
-    es_pdf = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
-    mt     = "application/pdf" if es_pdf else (media_type if media_type.startswith("image/") else "image/jpeg")
-    partes = [gtypes.Part.from_bytes(data=archivo_bytes, mime_type=mt), PROMPT_EXTRACCION]
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": mt, "data": b64data}},
+                {"text": PROMPT_EXTRACCION},
+            ]
+        }]
+    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
 
-    # Reintento automático si hay 429
     for intento in range(3):
-        try:
-            respuesta = cliente.models.generate_content(model=GEMINI_MODEL, contents=partes)
-            break
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                # Extraer retryDelay del mensaje si está disponible
-                import re
-                m      = re.search(r"retry.*?(\d+)s", err, re.IGNORECASE)
-                espera = int(m.group(1)) if m else 30
-                espera = min(espera, 60)
-                if intento < 2:
-                    time.sleep(espera)
-                else:
-                    raise
-            else:
-                raise
+        r = httpx.post(url, json=payload, timeout=120)
+        if r.status_code == 429:
+            m      = re.search(r"retryDelay.*?(\d+)s", r.text, re.IGNORECASE)
+            espera = min(int(m.group(1)) if m else 30, 60)
+            if intento < 2:
+                time.sleep(espera)
+                continue
+        r.raise_for_status()
+        break
 
-    texto = respuesta.text.strip()
+    data  = r.json()
+    texto = data["candidates"][0]["content"]["parts"][0]["text"].strip()
     if texto.startswith("```"):
         lineas = texto.splitlines()
         texto  = "\n".join(lineas[1:-1] if lineas[-1].strip() == "```" else lineas[1:])
