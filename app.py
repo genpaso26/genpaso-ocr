@@ -1,17 +1,7 @@
 """
 GenPaso OCR v7 — Soporte dual de proveedores: Google Gemini (principal, capa gratuita)
-                  y Anthropic Claude (respaldo). Persistencia robusta con Excel + CSV.
-
-NOTA TÉCNICA: En Streamlit Community Cloud el filesystem es efímero y puede
-resetearse en reinicios o redeploys. Esta versión mitiga el problema con:
-  1. Guardado inmediato en Excel + CSV después de cada archivo procesado.
-  2. Restauración manual subiendo el Excel descargado previamente.
-  3. Backups automáticos antes de resetear.
-Para persistencia 100% permanente se recomienda integrar una DB externa:
-  - Supabase / PostgreSQL
-  - Google Drive API
-  - AWS S3
-  - Firebase Firestore
+                  y Anthropic Claude (respaldo). Persistencia robusta con Excel + CSV
+                  y auto-guardado en GitHub (rama auto-save, no dispara redeploy).
 """
 
 import base64
@@ -183,28 +173,107 @@ def normalizar_master_db(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+GITHUB_BRANCH = "auto-save"
+
+
+def _github_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def cargar_desde_github(token: str, repo: str) -> pd.DataFrame | None:
+    """Descarga GenPaso_Master_DB.xlsx desde la rama auto-save de GitHub."""
+    try:
+        import httpx
+        url = f"https://api.github.com/repos/{repo}/contents/GenPaso_Master_DB.xlsx"
+        r = httpx.get(url, headers=_github_headers(token), params={"ref": GITHUB_BRANCH}, timeout=30)
+        if r.status_code != 200:
+            return None
+        content_b64 = r.json().get("content", "").replace("\n", "")
+        excel_bytes = base64.b64decode(content_b64)
+        df = pd.read_excel(BytesIO(excel_bytes), dtype=str)
+        return normalizar_master_db(df)
+    except Exception:
+        return None
+
+
+def guardar_en_github(df: pd.DataFrame, token: str, repo: str) -> tuple[bool, str]:
+    """Sube el Excel a la rama auto-save de GitHub (no dispara redeploy de Streamlit)."""
+    try:
+        import httpx
+        api_base = f"https://api.github.com/repos/{repo}"
+        hdrs     = _github_headers(token)
+        excel_bytes = df_a_excel(df)
+        content_b64 = base64.b64encode(excel_bytes).decode()
+
+        with httpx.Client(headers=hdrs, timeout=60) as client:
+            # Crear rama auto-save si no existe
+            r = client.get(f"{api_base}/git/refs/heads/{GITHUB_BRANCH}")
+            if r.status_code == 404:
+                main_r   = client.get(f"{api_base}/git/refs/heads/main")
+                main_sha = main_r.json()["object"]["sha"]
+                client.post(f"{api_base}/git/refs", json={
+                    "ref": f"refs/heads/{GITHUB_BRANCH}",
+                    "sha": main_sha,
+                })
+
+            # Obtener SHA actual del archivo (si existe)
+            r   = client.get(f"{api_base}/contents/GenPaso_Master_DB.xlsx", params={"ref": GITHUB_BRANCH})
+            sha = r.json().get("sha") if r.status_code == 200 else None
+
+            # Crear o actualizar archivo
+            payload = {
+                "message": f"auto-save {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC — {len(df)} registros",
+                "content": content_b64,
+                "branch":  GITHUB_BRANCH,
+            }
+            if sha:
+                payload["sha"] = sha
+
+            r = client.put(f"{api_base}/contents/GenPaso_Master_DB.xlsx", json=payload)
+            if r.status_code in (200, 201):
+                return True, f"{len(df)} registros guardados en GitHub (rama {GITHUB_BRANCH})"
+            return False, f"GitHub API error {r.status_code}: {r.text[:200]}"
+
+    except Exception as e:
+        return False, str(e)
+
+
 def cargar_master_db() -> pd.DataFrame:
     """
     Orden de prioridad:
-      1. GenPaso_Master_DB.xlsx  (fuente principal)
+      1. GenPaso_Master_DB.xlsx  (fuente principal — disco local efímero)
       2. GenPaso_Master_DB.csv   (migrar y generar xlsx)
-      3. DataFrame vacío
+      3. GitHub rama auto-save   (persistencia entre reinicios)
+      4. DataFrame vacío
     """
     if MASTER_XLSX_PATH.exists():
         try:
             df = pd.read_excel(MASTER_XLSX_PATH, dtype=str)
             return normalizar_master_db(df)
         except Exception:
-            pass  # Si el Excel está corrupto, intentar CSV
+            pass
 
     if MASTER_CSV_PATH.exists():
         try:
             df = pd.read_csv(MASTER_CSV_PATH, dtype=str)
             df = normalizar_master_db(df)
-            guardar_master_db(df)  # Migrar a Excel
+            guardar_master_db(df)
             return df
         except Exception:
             pass
+
+    # Fallback: intentar GitHub
+    token = _obtener_secret("GITHUB_TOKEN")
+    repo  = _obtener_secret("GITHUB_REPO")
+    if token and repo:
+        df = cargar_desde_github(token, repo)
+        if df is not None:
+            guardar_master_db(df)
+            return df
 
     return pd.DataFrame(columns=COLUMNAS_MASTER)
 
@@ -610,6 +679,16 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Estado de auto-guardado GitHub ────────────────────────────────────────
+    gh_token = _obtener_secret("GITHUB_TOKEN")
+    gh_repo  = _obtener_secret("GITHUB_REPO")
+    if gh_token and gh_repo:
+        st.caption(f"☁️ Auto-guardado GitHub activado · repo: `{gh_repo}`")
+    else:
+        st.caption("☁️ Auto-guardado GitHub: no configurado")
+
+    st.divider()
+
     # ── REQ 7: Advertencia si no hay DB persistente ────────────────────────────
     if not hay_db_persistente():
         st.warning(
@@ -836,6 +915,17 @@ if procesar and archivos:
                 st.error(f"❌ {archivo.name}: {e}")
 
     barra.progress(1.0, text=f"✅ Procesamiento completo — DB Maestra guardada con {len(db)} registros.")
+
+    # ── Auto-guardado en GitHub ────────────────────────────────────────────────
+    gh_token = _obtener_secret("GITHUB_TOKEN")
+    gh_repo  = _obtener_secret("GITHUB_REPO")
+    if gh_token and gh_repo:
+        with st.spinner("☁️ Sincronizando con GitHub..."):
+            ok, msg = guardar_en_github(db, gh_token, gh_repo)
+        if ok:
+            st.success(f"☁️ GitHub: {msg}")
+        else:
+            st.warning(f"⚠️ Auto-guardado en GitHub falló: {msg}")
 
     st.session_state.resumenes          = resumenes
     st.session_state.db_sesion          = pd.concat(registros_sesion, ignore_index=True) if registros_sesion else pd.DataFrame(columns=COLUMNAS_MASTER)
