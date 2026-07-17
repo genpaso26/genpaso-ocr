@@ -456,7 +456,7 @@ def _google_bearer_token(sa_json_str: str) -> str:
     header  = _b64url({"alg": "RS256", "typ": "JWT"})
     payload = _b64url({
         "iss":   sa["client_email"],
-        "scope": "https://www.googleapis.com/auth/generative-language",
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
         "aud":   "https://oauth2.googleapis.com/token",
         "iat":   now,
         "exp":   now + 3600,
@@ -472,13 +472,14 @@ def _google_bearer_token(sa_json_str: str) -> str:
         timeout=30,
     )
     r.raise_for_status()
-    token = r.json()["access_token"]
-    st.session_state["_google_token"] = {"token": token, "expires": now + 3600}
+    token      = r.json()["access_token"]
+    project_id = sa.get("project_id", "")
+    st.session_state["_google_token"] = {"token": token, "expires": now + 3600, "project_id": project_id}
     return token
 
 
 def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
-    """Llama a Gemini via REST API. Soporta API key y Service Account JSON."""
+    """Llama a Gemini via Vertex AI (service account) o Generative Language API (API key)."""
     import httpx
     import re
 
@@ -486,8 +487,9 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     api_key = _obtener_secret("GOOGLE_API_KEY")
 
     if sa_json:
-        bearer  = _google_bearer_token(sa_json)
-        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        bearer     = _google_bearer_token(sa_json)
+        project_id = st.session_state.get("_google_token", {}).get("project_id") or json.loads(sa_json).get("project_id")
+        url     = f"https://us-central1-aiplatform.googleapis.com/v1/projects/{project_id}/locations/us-central1/publishers/google/models/{GEMINI_MODEL}:generateContent"
         hdrs    = {"Authorization": f"Bearer {bearer}"}
         params  = {}
     elif api_key:
