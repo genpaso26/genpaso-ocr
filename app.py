@@ -456,7 +456,7 @@ def _google_bearer_token(sa_json_str: str) -> str:
     header  = _b64url({"alg": "RS256", "typ": "JWT"})
     payload = _b64url({
         "iss":   sa["client_email"],
-        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "scope": "https://www.googleapis.com/auth/generative-language",
         "aud":   "https://oauth2.googleapis.com/token",
         "iat":   now,
         "exp":   now + 3600,
@@ -519,6 +519,9 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
             if intento < 2:
                 time.sleep(espera)
                 continue
+            raise RuntimeError(f"Gemini 429 (sin créditos o cuota agotada): {r.text[:500]}")
+        if r.status_code == 403:
+            raise RuntimeError(f"Gemini 403 (permisos): {r.text[:500]}")
         r.raise_for_status()
         break
 
