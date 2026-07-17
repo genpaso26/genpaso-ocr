@@ -487,9 +487,8 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
     api_key = _obtener_secret("GOOGLE_API_KEY")
 
     if sa_json:
-        bearer     = _google_bearer_token(sa_json)
-        project_id = st.session_state.get("_google_token", {}).get("project_id") or json.loads(sa_json).get("project_id")
-        url     = f"https://us-central1-aiplatform.googleapis.com/v1/projects/{project_id}/locations/us-central1/publishers/google/models/{GEMINI_MODEL}:generateContent"
+        bearer  = _google_bearer_token(sa_json)
+        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
         hdrs    = {"Authorization": f"Bearer {bearer}"}
         params  = {}
     elif api_key:
