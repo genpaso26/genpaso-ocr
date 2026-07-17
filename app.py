@@ -435,16 +435,67 @@ def _obtener_secret(clave: str) -> str:
 
 
 
-# ── Gemini (REST API directa — sin google-genai) ───────────────────────────────
+# ── Gemini (REST API directa — API key o Service Account) ─────────────────────
+
+def _google_bearer_token(sa_json_str: str) -> str:
+    """Genera un OAuth2 Bearer token desde un Service Account JSON. Cachea en session_state."""
+    cached = st.session_state.get("_google_token", {})
+    if cached.get("expires", 0) > time.time() + 60:
+        return cached["token"]
+
+    import httpx
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+
+    sa  = json.loads(sa_json_str)
+    now = int(time.time())
+
+    def _b64url(data: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(data, separators=(",", ":")).encode()).rstrip(b"=").decode()
+
+    header  = _b64url({"alg": "RS256", "typ": "JWT"})
+    payload = _b64url({
+        "iss":   sa["client_email"],
+        "scope": "https://www.googleapis.com/auth/generative-language",
+        "aud":   "https://oauth2.googleapis.com/token",
+        "iat":   now,
+        "exp":   now + 3600,
+    })
+    unsigned = f"{header}.{payload}"
+    pk = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+    sig = pk.sign(unsigned.encode(), asym_padding.PKCS1v15(), hashes.SHA256())
+    jwt = f"{unsigned}.{base64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+
+    r = httpx.post(
+        "https://oauth2.googleapis.com/token",
+        data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": jwt},
+        timeout=30,
+    )
+    r.raise_for_status()
+    token = r.json()["access_token"]
+    st.session_state["_google_token"] = {"token": token, "expires": now + 3600}
+    return token
+
 
 def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "") -> dict:
-    """Llama a Gemini via REST API con httpx. No requiere google-genai instalado."""
+    """Llama a Gemini via REST API. Soporta API key y Service Account JSON."""
     import httpx
     import re
 
+    sa_json = _obtener_secret("GOOGLE_SERVICE_ACCOUNT_JSON")
     api_key = _obtener_secret("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError("No se encontró GOOGLE_API_KEY en Secrets o .env")
+
+    if sa_json:
+        bearer  = _google_bearer_token(sa_json)
+        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        hdrs    = {"Authorization": f"Bearer {bearer}"}
+        params  = {}
+    elif api_key:
+        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        hdrs    = {}
+        params  = {"key": api_key}
+    else:
+        raise ValueError("Falta GOOGLE_API_KEY o GOOGLE_SERVICE_ACCOUNT_JSON en Secrets.")
 
     es_pdf  = "pdf" in media_type.lower() or filename.lower().endswith(".pdf")
     mt      = "application/pdf" if es_pdf else (media_type if media_type.startswith("image/") else "image/jpeg")
@@ -458,10 +509,9 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
             ]
         }]
     }
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
 
     for intento in range(3):
-        r = httpx.post(url, json=payload, timeout=120)
+        r = httpx.post(url, json=payload, headers=hdrs, params=params, timeout=120)
         if r.status_code == 429:
             m      = re.search(r"retryDelay.*?(\d+)s", r.text, re.IGNORECASE)
             espera = min(int(m.group(1)) if m else 30, 60)
