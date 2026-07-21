@@ -725,7 +725,7 @@ with st.sidebar:
         if not _obtener_secret("GOOGLE_API_KEY"):
             st.warning("⚠️ Falta GOOGLE_API_KEY en Secrets.")
         else:
-            st.caption(f"✅ Gemini (google-genai) · modelo: `{GEMINI_MODEL}`")
+            st.caption(f"✅ Gemini (REST) · modelo: `{GEMINI_MODEL}`")
     else:
         if not _obtener_secret("ANTHROPIC_API_KEY"):
             st.warning("⚠️ Falta ANTHROPIC_API_KEY en Secrets.")
