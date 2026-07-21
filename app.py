@@ -420,7 +420,7 @@ def insertar_o_actualizar(
 # API — GEMINI (principal) + ANTHROPIC (respaldo)
 # ══════════════════════════════════════════════════════════════════════════════
 
-GEMINI_MODEL    = "gemini-2.0-flash"
+GEMINI_MODEL    = "gemini-2.5-flash"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 
@@ -488,11 +488,11 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
 
     if sa_json:
         bearer  = _google_bearer_token(sa_json)
-        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        url     = f"https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent"
         hdrs    = {"Authorization": f"Bearer {bearer}"}
         params  = {}
     elif api_key:
-        url     = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+        url     = f"https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent"
         hdrs    = {}
         params  = {"key": api_key}
     else:
