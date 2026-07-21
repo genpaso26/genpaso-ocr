@@ -856,11 +856,12 @@ with col_titulo_carga:
         f"Recomendado: hasta **{LOTE_RECOMENDADO} archivos por lote** para garantizar estabilidad. "
         f"Máximo permitido: {LOTE_MAXIMO} archivos."
     )
+def _limpiar_uploader():
+    st.session_state.uploader_key += 1
+
 with col_limpiar:
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🗑️ Limpiar archivos", use_container_width=True):
-        st.session_state.uploader_key += 1
-        st.rerun()
+    st.button("🗑️ Limpiar archivos", use_container_width=True, on_click=_limpiar_uploader)
 
 archivos = st.file_uploader(
     "Arrastra o selecciona uno o varios registros",
