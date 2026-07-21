@@ -522,6 +522,8 @@ def llamar_api_gemini(archivo_bytes: bytes, media_type: str, filename: str = "")
             raise RuntimeError(f"Gemini 429 (sin créditos o cuota agotada): {r.text[:500]}")
         if r.status_code == 403:
             raise RuntimeError(f"Gemini 403 (permisos): {r.text[:500]}")
+        if r.status_code == 404:
+            raise RuntimeError(f"Gemini 404 (modelo/endpoint no encontrado): {r.text[:500]}")
         r.raise_for_status()
         break
 
